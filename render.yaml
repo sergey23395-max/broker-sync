@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: broker-sync
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: node index.js
+    healthCheckPath: /
+    envVars:
+      - key: WORKER_URL
+        value: https://broker.korolev-broker.workers.dev
+      - key: SESSION_KEY
+        generateValue: true
+      - key: NODE_VERSION
+        value: "22"
