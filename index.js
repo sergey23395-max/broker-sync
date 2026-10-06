@@ -391,6 +391,7 @@ const routes = {
   'POST /fetch': fetchPage,
   'POST /pf-search': pfSearch,
   'POST /video': 'video',
+  'POST /img': 'img',
 };
 http.createServer(async (req, res) => {
   const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
@@ -401,6 +402,16 @@ http.createServer(async (req, res) => {
   if (!KEY || key.length !== KEY.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(KEY))) return send(403, { error: 'forbidden' });
   let body = '';
   for await (const ch of req) { body += ch; if (body.length > 1e6) return send(413, { error: 'too big' }); }
+  if (h === 'img') {
+    try {
+      const b = body ? JSON.parse(body) : {};
+      const r = await fetch(b.url, { headers: { 'user-agent': UA, referer: 'https://www.cian.ru/', accept: 'image/avif,image/webp,image/*,*/*' } });
+      const type = r.headers.get('content-type') || '';
+      if (!r.ok || !type.startsWith('image/')) return send(400, { error: 'Фото не скачалось: ' + r.status });
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.writeHead(200, { 'content-type': type, 'content-length': buf.length }); return res.end(buf);
+    } catch (e) { return send(400, { error: e.message }); }
+  }
   if (h === 'video') { try { return await videoStream(req, res, body ? JSON.parse(body) : {}); } catch (e) { return send(400, { error: e.message }); } }
   try { send(200, await h(body ? JSON.parse(body) : {})); }
   catch (e) { send(400, { error: e.message || String(e) }); }
