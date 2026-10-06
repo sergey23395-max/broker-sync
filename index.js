@@ -273,7 +273,53 @@ async function fetchPage({ url }) {
     .filter(u => /cdn-cian|images\.cdn|static\.shared\.propertyfinder|bayut|avito|img/i.test(u) && !/avatar|logo|icon|thumb|promo|dummy|no_image/i.test(u)))].slice(0, 15);
   if (og('image') && !/dummy|no_image|logo/i.test(og('image'))) photos.unshift(og('image'));
   const text = [og('title'), og('description'), textOf(html).slice(0, 8000)].filter(Boolean).join('\n');
-  return { text, photos: [...new Set(photos)].slice(0, 15), fields: { title: og('title') } };
+  return { text, photos: [...new Set(photos)].slice(0, 15), fields: { title: og('title') }, videos: findVideos(flat) };
+}
+
+/** Видео объявления: Циан хранит их в JSON страницы ("videos":[{id,url}]), чаще всего на Kinescope; иногда YouTube/Rutube. */
+function findVideos(flat) {
+  const out = new Map();
+  for (const m of flat.matchAll(/"videos"\s*:\s*\[([^\]]{0,4000})\]/g)) {
+    for (const u of m[1].matchAll(/"url"\s*:\s*"([^"]+)"/g)) out.set(u[1], { url: u[1] });
+  }
+  for (const m of flat.matchAll(/https:\/\/kinescope\.io\/(?:embed\/)?[0-9a-f-]{36}/g)) out.set(m[0], { url: m[0] });
+  for (const m of flat.matchAll(/https:\/\/(?:www\.)?(?:youtube\.com\/(?:embed\/|watch\?v=)|youtu\.be\/)[\w-]{11}/g)) out.set(m[0], { url: m[0] });
+  return [...out.values()].map(v => ({ ...v, kind: /kinescope/.test(v.url) ? 'kinescope' : /youtu/.test(v.url) ? 'youtube' : 'other' })).slice(0, 5);
+}
+
+/** Kinescope: master.m3u8 → лучшее качество → цельный mp4 (без звука) → обычный MP4 через ffmpeg (-c copy). */
+async function kinescopeFile(url) {
+  const id = (/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(url) || [])[1];
+  if (!id) throw new Error('Не нашёл номер видео');
+  const H = { 'user-agent': UA, referer: 'https://www.cian.ru/' };
+  const master = await (await fetch(`https://kinescope.io/${id}/master.m3u8`, { headers: H })).text();
+  const qs = [...master.matchAll(/RESOLUTION=(\d+)x(\d+)[^\n]*\n(media\.m3u8\?[^\n]*type=video[^\n]*)/g)]
+    .map(m => ({ px: Number(m[1]) * Number(m[2]), path: m[3] })).sort((a, b) => b.px - a.px);
+  if (!qs.length) throw new Error('Видео недоступно');
+  const media = await (await fetch(`https://kinescope.io/${id}/${qs[0].path}`, { headers: H })).text();
+  const file = (/EXT-X-MAP:URI="([^"]+)"/.exec(media) || /(https:\/\/[^\s?]+\.mp4)/.exec(media) || [])[1];
+  if (!file) throw new Error('Не нашёл файл видео');
+  return { file: file.split('?')[0], headers: H };
+}
+
+async function videoStream(req, res, body) {
+  const { file, headers } = await kinescopeFile(body.url || '');
+  const tmpIn = `/tmp/v-${Date.now()}.mp4`, tmpOut = tmpIn.replace('.mp4', '-out.mp4');
+  const fs = await import('node:fs');
+  const r = await fetch(file, { headers });
+  if (!r.ok) throw new Error('Видео не скачалось: ' + r.status);
+  fs.writeFileSync(tmpIn, Buffer.from(await r.arrayBuffer()));
+  let path = tmpIn;
+  try {
+    const ff = (await import('ffmpeg-static')).default;
+    const { execFileSync } = await import('node:child_process');
+    execFileSync(ff, ['-y', '-i', tmpIn, '-c', 'copy', '-an', '-movflags', '+faststart', tmpOut], { stdio: 'ignore', timeout: 120000 });
+    path = tmpOut;
+  } catch (e) { log('ffmpeg', e.message); }
+  const buf = fs.readFileSync(path);
+  for (const f of [tmpIn, tmpOut]) fs.rmSync(f, { force: true });
+  res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': buf.length, 'content-disposition': 'attachment; filename="video.mp4"' });
+  res.end(buf);
 }
 
 /** Поиск Property Finder по фильтрам: район, спальни, бюджет, покупка/аренда, готовое/строящееся. */
@@ -309,6 +355,7 @@ const routes = {
   'POST /reload': async () => { await loadApiKeys(); if (!client && API_ID) boot(); return { ok: true, keys: !!API_ID }; },
   'POST /fetch': fetchPage,
   'POST /pf-search': pfSearch,
+  'POST /video': 'video',
 };
 http.createServer(async (req, res) => {
   const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
@@ -319,6 +366,7 @@ http.createServer(async (req, res) => {
   if (!KEY || key.length !== KEY.length || !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(KEY))) return send(403, { error: 'forbidden' });
   let body = '';
   for await (const ch of req) { body += ch; if (body.length > 1e6) return send(413, { error: 'too big' }); }
+  if (h === 'video') { try { return await videoStream(req, res, body ? JSON.parse(body) : {}); } catch (e) { return send(400, { error: e.message }); } }
   try { send(200, await h(body ? JSON.parse(body) : {})); }
   catch (e) { send(400, { error: e.message || String(e) }); }
 }).listen(PORT, () => { log('broker-sync на порту', PORT); boot(); });
