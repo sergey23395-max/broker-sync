@@ -390,6 +390,14 @@ const routes = {
   'POST /reload': async () => { await loadApiKeys(); if (!client && API_ID) boot(); return { ok: true, keys: !!API_ID }; },
   'POST /fetch': fetchPage,
   'POST /pf-search': pfSearch,
+  'POST /pf-project': async ({ url }) => {
+    // Страница проекта застройщика: полная галерея в оригинальном размере и описание.
+    const nd = nextData(await get(url));
+    const d = nd?.props?.pageProps?.detailResult || {};
+    const images = (d.images || []).filter(i => i.type === 'image' || !i.type).map(i => String(i.source || i).replace(/\/[a-z]+\.webp$/, '/original.jpg'));
+    const desc = textOf(String(d.description || '')).slice(0, 3000);
+    return { images: [...new Set(images)].slice(0, 20), desc };
+  },
   'POST /video': 'video',
   'POST /img': 'img',
 };
