@@ -273,7 +273,42 @@ async function fetchPage({ url }) {
     .filter(u => /cdn-cian|images\.cdn|static\.shared\.propertyfinder|bayut|avito|img/i.test(u) && !/avatar|logo|icon|thumb|promo|dummy|no_image/i.test(u)))].slice(0, 15);
   if (og('image') && !/dummy|no_image|logo/i.test(og('image'))) photos.unshift(og('image'));
   const text = [og('title'), og('description'), textOf(html).slice(0, 8000)].filter(Boolean).join('\n');
-  return { text, photos: [...new Set(photos)].slice(0, 15), fields: { title: og('title') }, videos: findVideos(flat) };
+  const fields = /cian\.ru/.test(url) ? cianFields(flat) : { title: og('title') };
+  const allPhotos = fields.photos?.length ? fields.photos : [...new Set(photos)].slice(0, 15);
+  delete fields.photos;
+  return { text, photos: allPhotos, fields, videos: findVideos(flat) };
+}
+
+/** Циан: данные объявления из JSON страницы → поля как в презентации Сергея (цена, этаж, площадь, ремонт, планировка). */
+function cianFields(flat) {
+  const num = k => { const m = new RegExp('"' + k + '":"?([0-9.]+)"?').exec(flat); return m ? Number(m[1]) : null; };
+  const str = k => (new RegExp('"' + k + '":"([^"]{0,80})"').exec(flat) || [])[1] || '';
+  const sp = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const jk = (/"jk":\{[^{}]{0,300}?"name":"([^"]+)"/.exec(flat) || /"newbuilding":\{[^{}]{0,300}?"name":"([^"]+)"/.exec(flat) || [])[1] || '';
+  const titleCase = t => t.replace(/\s*\(.*\)$/, '').toLowerCase().replace(/(^|[\s-])(\p{L})/gu, (_, a, b) => a + b.toUpperCase());
+  const price = num('price'), floor = num('floorNumber'), floors = num('floorsCount'), area = num('totalArea'), rooms = num('roomsCount');
+  const repair = { design: 'Дизайнерский ремонт', euro: 'Евроремонт', cosmetic: 'Косметический ремонт', no: 'Без ремонта' }[str('repairType')] || '';
+  // Описание объявления (а не блоки банка): самый длинный "description" со словами про жильё
+  const descs = [...flat.matchAll(/"description":"((?:[^"\\]|\\.){20,4000})"/g)].map(m => m[1].replace(/\\n/g, '\n'));
+  const jkWord = (jk.split(/\s|\(/)[0] || '').toLowerCase();
+  const own = descs.filter(d => /квартир|апартамент|комнат|спальн|сда[её]т|прода[её]т/i.test(d) && !/в народе|обычно в таких|кредит|рассрочк|ипотек/i.test(d));
+  const desc = own.find(d => jkWord && d.toLowerCase().includes(jkWord)) || own.find(d => /^(сда|прода|предлага)/i.test(d.trim())) || own[0] || '';
+  const isStudio = str('flatType') === 'studio' || /студи/i.test(desc.slice(0, 200));
+  let layout = '';
+  if (isStudio) layout = 'Студия';
+  else if (rooms) layout = rooms === 1 ? 'Гостиная' : rooms === 2 ? 'Гостиная + спальня' : `Гостиная + ${rooms - 1} спальни`;
+  if (layout && /гардероб/i.test(desc)) layout += ' + гардеробная';
+  if (layout && /кабинет/i.test(desc)) layout += ' + кабинет';
+  const deal = /"dealType":"rent"/.test(flat) || /"paymentPeriod":"monthly"/.test(flat) ? 'Аренда' : 'Продажа';
+  return {
+    title: jk ? titleCase(jk) : '',
+    price: price ? sp(price) : '',
+    priceNum: price || null, currency: '₽',
+    floor: floor ? `${floor} этаж` : '', floors: floors || null,
+    area: area ? `${String(area).replace('.', ',')} м²` : '', areaNum: area || null,
+    rooms: layout, facts: repair, deal, cianDesc: desc,
+    photos: [...new Set([...flat.matchAll(/"fullUrl":"(https:[^"]+?\.(?:jpe?g|webp))"/g)].map(m => m[1]))].slice(0, 40),
+  };
 }
 
 /** Видео объявления: Циан хранит их в JSON страницы ("videos":[{id,url}]), чаще всего на Kinescope; иногда YouTube/Rutube. */
