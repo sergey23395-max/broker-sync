@@ -317,14 +317,15 @@ function findVideos(flat) {
   for (const m of flat.matchAll(/"videos"\s*:\s*\[([^\]]{0,4000})\]/g)) {
     for (const u of m[1].matchAll(/"url"\s*:\s*"([^"]+)"/g)) out.set(u[1], { url: u[1] });
   }
-  for (const m of flat.matchAll(/https:\/\/kinescope\.io\/(?:embed\/)?[0-9a-f-]{36}/g)) out.set(m[0], { url: m[0] });
+  for (const m of flat.matchAll(/https:\/\/kinescope\.io\/(?:embed\/)?(?:[0-9a-f-]{36}|[A-Za-z0-9]{12,40})(?=["'?/#\s]|$)/g)) out.set(m[0], { url: m[0] });
   for (const m of flat.matchAll(/https:\/\/(?:www\.)?(?:youtube\.com\/(?:embed\/|watch\?v=)|youtu\.be\/)[\w-]{11}/g)) out.set(m[0], { url: m[0] });
   return [...out.values()].map(v => ({ ...v, kind: /kinescope/.test(v.url) ? 'kinescope' : /youtu/.test(v.url) ? 'youtube' : 'other' })).slice(0, 5);
 }
 
 /** Kinescope: master.m3u8 → лучшее качество → цельный mp4 (без звука) → обычный MP4 через ffmpeg (-c copy). */
 async function kinescopeFile(url) {
-  const id = (/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(url) || [])[1];
+  // Номер видео: старый формат — UUID, новый — короткий код (kinescope.io/embed/sZZB5ihnKSHVMawguMxWUB).
+  const id = (/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(url) || /kinescope\.io\/(?:embed\/)?([A-Za-z0-9]{12,40})(?:[/?#]|$)/.exec(url) || [])[1];
   if (!id) throw new Error('Не нашёл номер видео');
   const H = { 'user-agent': UA, referer: 'https://www.cian.ru/' };
   const master = await (await fetch(`https://kinescope.io/${id}/master.m3u8`, { headers: H })).text();
