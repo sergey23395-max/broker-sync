@@ -188,6 +188,26 @@ async function boot() {
 }
 
 // ——— Вход в Telegram (код вводит Сергей один раз из приложения) ———
+function codeWhere(t) {
+  const k = t?.className || '';
+  if (k.includes('App')) return 'в приложение Telegram — чат «Telegram» с синей галочкой';
+  if (k.includes('Sms')) return 'по SMS';
+  if (k.includes('Call') || k.includes('FlashCall') || k.includes('MissedCall')) return 'звонком';
+  if (k.includes('Email')) return 'на почту, привязанную к Telegram';
+  if (k.includes('Fragment')) return 'в Fragment';
+  return 'в Telegram';
+}
+function loginErr(e) {
+  const m = String(e.errorMessage || e.message || e);
+  if (/FLOOD_WAIT_(\d+)|FLOOD/.test(m)) { const n = Number((/FLOOD_WAIT_(\d+)/.exec(m) || [])[1] || 0); return `Telegram просит подождать${n ? ' ' + Math.ceil(n / 60) + ' мин' : ''} — слишком много запросов кода`; }
+  if (m.includes('PHONE_CODE_INVALID')) return 'Неверный код — проверьте цифры';
+  if (m.includes('PHONE_CODE_EXPIRED')) return 'Код устарел — нажмите «Новый код»';
+  if (m.includes('PHONE_NUMBER_INVALID')) return 'Номер не подходит — в формате +7…';
+  if (m.includes('PASSWORD_HASH_INVALID')) return 'Неверный облачный пароль';
+  if (m.includes('SEND_CODE_UNAVAILABLE')) return 'Все способы отправки кода уже использованы — подождите и начните заново';
+  return m;
+}
+
 async function doLogin(b) {
   if (!API_ID || !API_HASH) await loadApiKeys();
   if (!API_ID || !API_HASH) throw new Error('Сначала введите api_id и api_hash в приложении');
@@ -195,11 +215,22 @@ async function doLogin(b) {
     const c = new TelegramClient(new StringSession(''), API_ID, API_HASH, { connectionRetries: 5 });
     c.setLogLevel('error');
     await c.connect();
-    const r = await c.invoke(new Api.auth.SendCode({ phoneNumber: b.phone, apiId: API_ID, apiHash: API_HASH, settings: new Api.CodeSettings({}) }));
+    let r;
+    try { r = await c.invoke(new Api.auth.SendCode({ phoneNumber: b.phone, apiId: API_ID, apiHash: API_HASH, settings: new Api.CodeSettings({}) })); }
+    catch (e) { log('вход: код не запрошен', e.errorMessage || e.message); throw new Error(loginErr(e)); }
     login = { phone: b.phone, phoneCodeHash: r.phoneCodeHash, client: c };
-    return { next: 'code' };
+    log('вход: код отправлен', codeWhere(r.type));
+    return { next: 'code', where: codeWhere(r.type) };
   }
-  if (!login) throw new Error('Сначала номер телефона');
+  if (!login) throw new Error('Сервис перезапускался — введите номер ещё раз и получите новый код');
+  if (b.resend) {
+    try {
+      const r = await login.client.invoke(new Api.auth.ResendCode({ phoneNumber: login.phone, phoneCodeHash: login.phoneCodeHash }));
+      login.phoneCodeHash = r.phoneCodeHash;
+      log('вход: код отправлен повторно', codeWhere(r.type));
+      return { next: 'code', where: codeWhere(r.type) };
+    } catch (e) { log('вход: повтор не удался', e.errorMessage || e.message); throw new Error(loginErr(e)); }
+  }
   const c = login.client;
   try {
     if (b.code) {
@@ -210,8 +241,9 @@ async function doLogin(b) {
       await c.invoke(new Api.auth.CheckPassword({ password: await computeCheck(pwd, b.password) }));
     }
   } catch (e) {
-    if (String(e.errorMessage || e.message).includes('SESSION_PASSWORD_NEEDED')) return { next: 'password' };
-    throw new Error(e.errorMessage || e.message);
+    if (String(e.errorMessage || e.message).includes('SESSION_PASSWORD_NEEDED')) { log('вход: нужен облачный пароль'); return { next: 'password' }; }
+    log('вход: ошибка', e.errorMessage || e.message);
+    throw new Error(loginErr(e));
   }
   const s = c.session.save();
   await w('/api/sync/session', { method: 'PUT', body: { session: seal(s) } });
