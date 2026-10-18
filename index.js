@@ -383,8 +383,40 @@ async function pfSearch(b) {
   return { url, total: sr.meta?.total_count || items.length, page: sr.meta?.page || 1, pages: sr.meta?.page_count || 1, items };
 }
 
+// ——— Отправка сообщения (только по нажатию Сергея в приложении, по одному) ———
+let lastSendAt = 0;
+let dialogsLoaded = false;
+async function findPeer({ tg_id, username, phone }) {
+  const tries = [];
+  if (tg_id) tries.push(() => client.getEntity(BigInt(tg_id)));
+  if (username) tries.push(() => client.getEntity(String(username).replace(/^@/, '')));
+  if (phone) tries.push(() => client.getEntity('+' + String(phone).replace(/\D/g, '')));
+  for (let round = 0; round < 2; round++) {
+    for (const t of tries) { try { const e = await t(); if (e) return e; } catch { /* следующий способ */ } }
+    // После перезапуска кэш собеседников пуст — один раз загружаем список диалогов и пробуем снова.
+    if (dialogsLoaded) break;
+    await client.getDialogs({ limit: 500 }).catch(() => {});
+    dialogsLoaded = true;
+  }
+  throw new Error('Не нашёл человека в Telegram (нет переписки, ника или номер не в контактах)');
+}
+async function sendMsg(b) {
+  if (!client || !authorized) throw new Error('Telegram не подключён');
+  const text = String(b.text || '').trim();
+  if (!text) throw new Error('Пустое сообщение');
+  if (text.length > 4096) throw new Error('Слишком длинное сообщение');
+  const wait = 3000 - (Date.now() - lastSendAt); // защита от двойного нажатия
+  if (wait > 0) throw new Error('Подождите пару секунд');
+  lastSendAt = Date.now();
+  const u = await findPeer(b);
+  if (u.bot || u.self || u.className !== 'User') throw new Error('Это не личный чат');
+  const m = await client.sendMessage(u, { message: text, linkPreview: true });
+  return { ok: true, peer: peerInfo(u), msg: toMsg(m, u.id) };
+}
+
 // ——— HTTP ———
 const routes = {
+  'POST /send': sendMsg,
   'GET /health': async () => ({ ok: true, authorized, lastMessageAt, startedAt, queue: queue.size }),
   'POST /login': doLogin,
   'POST /logout': doLogout,
